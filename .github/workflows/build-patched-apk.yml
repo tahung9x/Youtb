@@ -1,4 +1,4 @@
-name: Build Parallel Fermata Mod APK
+name: Patch and Build Fermata APK
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: 1. Checkout mã nguồn kèm Submodules
         uses: actions/checkout@v4
@@ -15,30 +15,17 @@ jobs:
           submodules: recursive
 
       - name: 2. Cài đặt JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 3. Patch lỗi dừng Video khi mở Map & Đổi tên thành "Fermata Mod"
+      - name: 3. Tự động Patch lỗi dừng Video/YouTube khi mở Map
         run: |
           python3 - << 'EOF'
-          import glob, re
+          import os, glob, re
 
-          # --- 1. Đổi tên hiển thị (App Label) để cài song song với bản gốc ---
-          for xml_file in glob.glob("**/res/values*/strings.xml", recursive=True):
-              with open(xml_file, "r", encoding="utf-8") as f:
-                  content = f.read()
-              new_content = content.replace('>Fermata Auto<', '>Fermata Mod<')
-              new_content = new_content.replace('>Fermata Mirror<', '>Fermata Mirror Mod<')
-              new_content = new_content.replace('>Fermata FS Mirror<', '>Fermata FS Mod<')
-              new_content = new_content.replace('>Fermata Media Service<', '>Fermata Service Mod<')
-              if new_content != content:
-                  with open(xml_file, "w", encoding="utf-8") as f:
-                      f.write(new_content)
-                  print(f"Renamed app labels in: {xml_file}")
-
-          # --- 2. Chặn YouTube phát hiện ẩn màn hình (Page Visibility API) ---
+          # --- PATCH 1: Chặn YouTube phát hiện ẩn màn hình (Page Visibility API) ---
           for yt_js in glob.glob("**/assets/yt.js", recursive=True):
               with open(yt_js, "r", encoding="utf-8") as f:
                   content = f.read()
@@ -52,10 +39,11 @@ jobs:
                   f.write(patch_js + "\n" + content)
               print(f"Patched JS: {yt_js}")
 
-          # --- 3. Giữ FermataWebView luôn chạy dưới nền khi nhìn Map ---
+          # --- PATCH 2: Giữ FermataWebView luôn chạy khi chuyển sang ứng dụng Map ---
           for wv_file in glob.glob("**/FermataWebView.java", recursive=True):
               with open(wv_file, "r", encoding="utf-8") as f:
                   code = f.read()
+              # Xóa các hàm onPause / onWindowVisibilityChanged cũ nếu có để tránh trùng lặp
               code = re.sub(r'@Override\s+protected void onWindowVisibilityChanged\(int visibility\)\s*\{[^}]*\}', '', code)
               code = re.sub(r'@Override\s+public void onPause\(\)\s*\{[^}]*\}', '', code)
               
@@ -82,10 +70,11 @@ jobs:
                       f.write(code)
                   print(f"Patched WebView: {wv_file}")
 
-          # --- 4. Ngăn MainActivityDelegate / VideoView tạm dừng MediaEngine khi mất Surface ---
+          # --- PATCH 3: Ngăn MainActivityDelegate / VideoView tạm dừng MediaEngine khi mất Surface ---
           for delegate_file in glob.glob("**/MainActivityDelegate.java", recursive=True):
               with open(delegate_file, "r", encoding="utf-8") as f:
                   code = f.read()
+              # Vô hiệu hóa lệnh pause tự động khi CarActivity rơi vào onPause/onStop nếu đang phát video
               code = code.replace("getMediaServiceBinder().onPause();", "// getMediaServiceBinder().onPause();")
               with open(delegate_file, "w", encoding="utf-8") as f:
                   f.write(code)
@@ -94,41 +83,22 @@ jobs:
           for vv_file in glob.glob("**/VideoView.java", recursive=True):
               with open(vv_file, "r", encoding="utf-8") as f:
                   code = f.read()
+              # Đảm bảo khi surfaceDestroyed chỉ tách surface chứ không dừng phát
               code = re.sub(r'(public void surfaceDestroyed\([^{]+\{[^}]*?)(eng\.pause\(\);|b\.onPause\(\);)', r'\1// \2', code, flags=re.DOTALL)
               with open(vv_file, "w", encoding="utf-8") as f:
                   f.write(code)
               print(f"Patched VideoView: {vv_file}")
           EOF
 
-      - name: 4. Biên dịch APK (.mod) và tự động Ký mọi file APK xuất ra
+      - name: 4. Đóng gói thành file APK hoàn chỉnh (Bản Auto Release)
         run: |
           chmod +x gradlew
-          ./gradlew assembleAutoRelease -PAPP_ID_SFX=.mod -x lint -x test
+          ./gradlew assembleAutoRelease -x lint -x test
 
-          echo "=== Danh sách file APK vừa được Gradle tạo ra ==="
-          find . -name "*.apk"
-
-          # Tạo keystore để ký APK
-          keytool -genkey -v -keystore mod-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias modkey -storepass 123456 -keypass 123456 -dname "CN=FermataMod, OU=Auto, O=Mod, L=HP, S=HP, C=VN"
-          
-          mkdir -p signed_apk
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
-          
-          # Quét tất cả các file .apk trong thư mục build (bất kể tên file là gì) và ký tên
-          for apk in $(find . -path "*/build/*" -name "*.apk"); do
-              BASENAME=$(basename "$apk" .apk)
-              OUT_APK="signed_apk/Fermata-Mod-${BASENAME}-signed.apk"
-              $BUILD_TOOLS_DIR/zipalign -f -p 4 "$apk" "$OUT_APK"
-              $BUILD_TOOLS_DIR/apksigner sign --ks mod-release.jks --ks-pass pass:123456 --key-pass pass:123456 "$OUT_APK"
-              echo "Đã ký thành công: $OUT_APK"
-          done
-
-          ls -lh signed_apk/
-
-      - name: 5. Tải file APK đã ký lên Artifacts
+      - name: 5. Xuất file APK để tải về
         uses: actions/upload-artifact@v4
         with:
-          name: Fermata-Mod-Parallel-APK
-          path: signed_apk/*.apk
-          if-no-files-found: error
-          
+          name: Fermata-Auto-Mod-BackgroundPlay
+          path: |
+            **/*.apk
+            
